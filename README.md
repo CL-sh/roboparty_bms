@@ -41,12 +41,14 @@ After installation, edit the config file to match your actual serial port (e.g.,
 sudo nano /etc/default/bms_daemon
 ```
 
-> **`BMS_TYPE=SCUD485` requires `BAUD_RATE=19200`.** The 485 spec (sec. 2 Serial Attributes) fixes
-> 19200 baud / 8 data bits / no parity / 1 stop bit, while the shipped default is `115200`, so the
-> type must be changed together with the baud rate. Note that `SerialPort::open()` knows only
-> 9600/19200/38400/57600/115200/230400/460800/921600 and silently falls back to 9600 for any other
-> value — a typo then looks like a dead battery (5 read failures, port reopen) instead of a
-> configuration error.
+> **`BAUD_RATE` for `BMS_TYPE=SCUD485` must match the pack's actual setting.** The 485 spec
+> (sec. 2 Serial Attributes) documents 19200 baud / 8 data bits / no parity / 1 stop bit, while
+> the shipped default is `115200` — and **both exist in the field**: a 2026-10 bench pack answers
+> at 115200 and stays completely silent at 19200. Try the spec's 19200 first and fall back to
+> 115200 when the pack does not answer. A wrong rate looks exactly like a dead battery (5 read
+> failures, port reopen), not like a configuration error. Note that `SerialPort::open()` knows
+> only 9600/19200/38400/57600/115200/230400/460800/921600 and silently falls back to 9600 for
+> any other value — a typo produces the same "dead battery" illusion.
 
 ### 4. Service Management
 ```bash
@@ -85,9 +87,9 @@ Configured in `/etc/default/bms_daemon`:
 - The destination is opened lazily and retried, so a missing `/dev/ttyS7` never holds up the BMS.
   Forwarding is a monitor feed and is never allowed to slow the Modbus read loop down; if the
   destination stops accepting, bytes are dropped and reported in the journal.
-- `FORWARD_BAUD` is independent of `BAUD_RATE`. Both default to 115200, but on a bus running at
-  another rate (SCUD485 mandates 19200) set `FORWARD_BAUD` to match, otherwise the forwarded
-  stream is garbled while still looking plausible.
+- `FORWARD_BAUD` is independent of `BAUD_RATE`. Both default to 115200, but when the bus runs at
+  another rate (SCUD485 is often 19200 — or 115200, see the note above) set `FORWARD_BAUD` to
+  match, otherwise the forwarded stream is garbled while still looking plausible.
 
 To turn it off:
 

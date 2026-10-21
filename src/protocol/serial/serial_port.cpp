@@ -27,7 +27,7 @@ bool SerialPort::open(const std::string& port, int baud_rate, int vmin, int vtim
     speed_t speed;
     switch (baud_rate) {
     case 9600:   speed = B9600;   break;
-    case 19200:  speed = B19200;  break; // required by the SCUD485 protocol
+    case 19200:  speed = B19200;  break; // SCUD485 spec rate (fielded packs also run 115200)
     case 38400:  speed = B38400;  break;
     case 57600:  speed = B57600;  break;
     case 115200: speed = B115200; break;
