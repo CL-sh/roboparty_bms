@@ -117,7 +117,7 @@ src/
 |---|---|---|---|---|
 | `TWS`（默认） | RS485 | Modbus RTU（addr 默认 0x01） | `/tmp/bms.sock` | 分字段合并广播（0x9000/容量/IO 三段读） |
 | `GF` | RS485 | Modbus RTU（addr 默认 0x03） | `/tmp/gf_bms.sock` | 分字段合并广播 |
-| `SCUD485` | RS485 | 私有帧（FE FE + CMD，CRC16-CCITT） | `/tmp/bms.sock` + `/tmp/bms.sock.fields` | **双协议**：主 socket 广播 BatteryStatus（旧协议不变），副 socket 广播 FieldMap（0x61 30B + 0x31 39B 解码，`get_field(name)` 按名查询，未知名返回 NaN）；协议强制 19200 8N1 |
+| `SCUD485` | RS485 | 私有帧（FE FE + CMD，CRC16-CCITT） | `/tmp/bms.sock` + `/tmp/bms.sock.fields` | **双协议**：主 socket 广播 BatteryStatus（旧协议不变），副 socket 广播 FieldMap（0x61 30B + 0x31 39B 解码，`get_field(name)` 按名查询，未知名返回 NaN）；规格 19200 8N1，实测设备也有跑 115200 的，以电池应答为准 |
 | `GFCAN` | SocketCAN | CAN 报文 bms0~bms9 解析 | —（daemon 仅轮询打印） | 客户端用 `GfCanBmsDriver` 直连 `can0` |
 | `NRF` | USB tty | 文本命令行（\r\n） | —（daemon 仅轮询打印） | 电源轨控制（48V/5V/19V/12V）、急停、看门狗；Python 直连 |
 
