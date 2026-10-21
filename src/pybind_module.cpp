@@ -38,7 +38,10 @@ PYBIND11_MODULE(bms_py, m) {
         .def("get_cycles", &BmsDriver::get_cycles)
         .def("get_io_state", &BmsDriver::get_io_state)
         .def("is_power_on", &BmsDriver::is_power_on)
-        .def("is_connected", &BmsDriver::is_connected);
+        .def("is_connected", &BmsDriver::is_connected)
+        // By-name field lookup (SCUD485); returns float('nan') when the name
+        // is unknown to the backend. Check with math.isnan().
+        .def("get_field", &BmsDriver::get_field, py::arg("name"));
 
     py::class_<NrfPmicDriver, BmsDriver, std::shared_ptr<NrfPmicDriver>>(m, "NrfPmicDriver")
         .def(py::init<const std::string&, int>(),
