@@ -18,7 +18,9 @@
 #include <memory>
 #include <string>
 #include <vector>
-
+#include <unordered_map>
+#include <stdexcept>
+#include <limits>
 #include "protocol/serial/serial_port.hpp"
 
 namespace bms {
@@ -91,6 +93,14 @@ class BmsDriver {
     // can tell "connected" apart from "believable". Only the SCUD485 backend
     // tracks it today.
     virtual double get_data_age_ms() const { return -1.0; }
+
+    // By-name field lookup for backends that expose a field map (SCUD485).
+    // Never throws: NaN means "no such field on this backend" (or no data
+    // yet). Callers distinguish with std::isnan() / math.isnan().
+    virtual double get_field(const std::string& name) const {
+        (void)name;
+        return std::numeric_limits<double>::quiet_NaN();
+    }
 
    protected:
     std::shared_ptr<spdlog::logger> logger_;
@@ -206,9 +216,11 @@ public:
     // cannot steal bytes from the protocol's own reads.
     void set_forward_fd(int fd) { serial_.set_forward_fd(fd); }
 
-    // One 0x61 query fills the whole record, or nothing at all: the daemon
-    // publishes snapshots, so a fresh record vouches for every field in it.
-    bool read_all(bms::BatteryStatus& status);
+    // One 0x61 + one 0x31 query fill the whole field map, or nothing at all:
+    // the daemon publishes snapshots, so a fresh record vouches for every
+    // field in it (0x61 alone has no temperatures or version words).
+    // Keys and fixed-point decode live in scud_fields.hpp.
+    bool read_fields(std::unordered_map<std::string, double>& out);
     bool read_version_info(bms::BatteryStatus& status);
     bool read_serial_number(std::string& sn);
     bool set_discharge_output(bool enable);
@@ -226,11 +238,6 @@ private:
                     int expect_len);
     bool query_0x61(std::vector<uint8_t>& data);
     bool query_0x31(std::vector<uint8_t>& data);
-
-    uint16_t get_u16_be(const uint8_t* buf, int offset);
-    int16_t get_i16_be(const uint8_t* buf, int offset);
-    uint16_t get_u16_be(const std::vector<uint8_t>& buf, int offset);
-    int16_t get_i16_be(const std::vector<uint8_t>& buf, int offset);
 };
 
 } // namespace scud_bms

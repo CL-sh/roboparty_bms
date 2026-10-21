@@ -99,7 +99,7 @@ sudo systemctl restart bms
 ## Data Freshness (SCUD485)
 
 The SCUD485 client separates "the transport is up" from "the battery is answering".
-`bms_daemon` polls the pack with one 0x61 query per second and publishes either a complete
+`bms_daemon` polls the pack with one 0x61+0x31 round per second and publishes either a complete
 fresh snapshot or nothing at all: a record on the wire always vouches for every field it
 carries (power_on included) and never mixes in values from an older round, so a socket that
 stays open while the bus is dead is detectable.
@@ -112,6 +112,29 @@ stays open while the bus is dead is detectable.
 Numeric getters (`get_voltage()`, `get_percentage()`, ...) keep returning the last received
 snapshot on purpose, so a short bus dropout does not look like a missing battery. TWS and
 GF485 clients are unchanged.
+
+## By-Name Query (SCUD485)
+
+SCUD485 runs **dual protocols side by side**:
+
+- **main socket (`/tmp/bms.sock`)**: the legacy wire protocol, unchanged -- fixed-size
+  `BatteryStatus` records in the historical units (V / Ah / 0..1 fraction). Existing clients
+  are unaffected.
+- **fields socket (`/tmp/bms.sock.fields`)**: serialized field-map records. The daemon decodes
+  the 0x61/0x31 frames per the definition tables in `src/drivers/scud485/scud_fields.hpp` and
+  clients fetch values with `get_field(name)` (Python: `bms_py.BmsDriver.get_field(name)`).
+
+`get_field` never throws: **NaN means "no such field" (or no data yet)** -- check with
+`std::isnan()` / `math.isnan()`. Decode is `raw × scale + value_off`; every field currently
+uses scale=1 / offset=0 (raw wire values) until the spec's fixed-point parameters land -- only
+the table constants change then. Voltage/capacity fields are unsigned, current/temperature
+two's complement; `get_current()` merges `chg_ma`/`dis_ma` as charging positive, discharging
+negative. The 0x31 alarm word is expanded into named boolean bits (`uv_alarm`, `ov_alarm`,
+`chg_h_alarm_flag`, `chg_l_alarm_flag`, `dsg_h_alarm_flag`, `dsg_l_alarm_flag`,
+`mos_h_alarm_flag`, `cap_low_alarm`, `cell_volt_dif_alarm`, `cell_temp_dif_alarm`,
+`cell_temp_h_alarm`, `cell_temp_l_alarm`, `afe_com_err`); the raw word stays under `alarm`.
+BAT FLAG expands likewise (`sys_dch_on` at Bit15 is what `is_power_on()` reports -- the old
+build mistakenly used Bit0). Full key list in the Chinese README section above.
 
 ## 🔄 OTA Firmware Update
 
