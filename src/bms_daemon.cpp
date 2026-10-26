@@ -616,10 +616,9 @@ int main(int argc, char** argv) {
               << " Baud=" << baud << " Timeout=" << timeout << std::endl;
 
     // The source is read at BAUD_RATE while the sink runs at FORWARD_BAUD.
-    // Both default to 115200, but a host whose bus runs at another rate (the
-    // SCUD485 spec documents 19200; fielded packs have also been seen at
-    // 115200) would forward into a UART transmitting at the wrong speed and
-    // produce a plausible-looking but garbled stream.
+    // Both default to 115200 (SCUD485 is 115200). A mismatch between the two
+    // would forward into a UART transmitting at the wrong speed and produce
+    // a plausible-looking but garbled stream.
     if (forward.enabled && forward.baud != baud &&
         same_device(forward.port_a, port)) {
         std::cerr << "[BMS Daemon] FORWARD_BAUD=" << forward.baud
@@ -646,11 +645,7 @@ int main(int argc, char** argv) {
                              : nullptr;
         run_daemon(proto, port, "/tmp/gf_bms.sock", forwarder.get());
     } else if (type == "SCUD485") {
-        // Point-to-point frames (no device address). The spec documents
-        // 19200 8N1, but fielded packs are not uniform (a bench pack answers
-        // at 115200 and is silent at 19200): set BAUD_RATE in
-        // /etc/default/bms_daemon to whatever the pack actually uses -- a
-        // wrong rate just looks like a dead battery.
+        // Point-to-point frames (no device address). 115200 8N1.
         scud_bms::ScudBmsProtocol proto(port, baud, timeout);
         auto forwarder = forward.enabled
                              ? make_protocol_forwarder(forward, proto, port)
