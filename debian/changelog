@@ -1,3 +1,18 @@
+roboparty-bms (1.6.1-1) stable; urgency=medium
+
+ This change gives SCUD485 applications complete, by-name access to everything 
+ the battery reports: per-cell voltages, all temperatures, capacities, versions, 
+ and every alarm and protection state — 67 values in all — where previously only 
+ a small fixed set was available.Existing integrations keep working unchanged, 
+ while the power status is now reported correctly and two frame-parsing errors 
+ are fixed. It also includes simple tooling to dump the full battery state, 
+ record it once per second over multi-hour stability runs, and analyze recordings 
+ for gaps, dropouts, or anomalies — all verified against real hardware with two 
+ flawless runs (2 h and 15 min, zero data loss).
+
+ -- cenliey <cenliey@qq.com>  Thu, 26 Oct 2026 12:00:00 +0800
+
+
 roboparty-bms (1.6.0-1) stable; urgency=medium
 
   * Move UART forwarding into bms_daemon, replacing robopi-addon's
