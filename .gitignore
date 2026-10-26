@@ -14,3 +14,10 @@ debian/.debhelper/
 
 # source ignore
 *.pdf
+
+# python cache
+__pycache__/
+*.py[cod]
+
+# local working notes (not part of the repo)
+docs/
