@@ -517,6 +517,6 @@ if __name__ == "__main__":
                     port_arg = line.split("=")[1].strip()
                     break
 
-    bin_file = sys.argv[2] if len(sys.argv) > 2 else "/opt/roboparty/lib/firmware/LB-13S2P_APP_v008_20260804-00.bin"
+    bin_file = sys.argv[2] if len(sys.argv) > 2 else "/opt/roboparty/lib/firmware/TWS_LB-13S2P_APP_v008_20260804-00.bin"
     ota = BmsOta(port_arg, bin_file)
     sys.exit(0 if ota.run() else 1)

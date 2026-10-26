@@ -41,11 +41,7 @@ sudo dpkg -i bms-daemon_1.1.3_arm64.deb
 sudo nano /etc/default/bms_daemon
 ```
 
-> **`BMS_TYPE=SCUD485` 必须配 `BAUD_RATE=19200`。** 485 协议文档第 2 节固定为 19200 波特率 /
-> 8 数据位 / 无校验 / 1 停止位，而包内默认是 `115200`，因此改类型的同时必须改波特率。
-> 另外 `SerialPort::open()` 只认 9600/19200/38400/57600/115200/230400/460800/921600，其余值会
-> **静默回落到 9600**，写错一个数字表现出来就是"电池完全不应答"（连续 5 次读失败后重开串口），
-> 而不是配置错误。
+> **`BMS_TYPE=SCUD485` 的 `BAUD_RATE` 必须是 `115200`。**
 
 ### 4. 服务管理
 ```bash
@@ -92,7 +88,7 @@ sudo systemctl restart bms
 
 ## 数据新鲜度（SCUD485）
 
-SCUD485 客户端把"链路通"和"电池在应答"分开：`bms_daemon` 每秒只做一次 0x61 查询，成功就
+SCUD485 客户端把"链路通"和"电池在应答"分开：`bms_daemon` 每秒做一轮 0x61+0x31 查询，全部成功才
 广播一条完整快照、失败就什么都不发——每条上线的记录都对自身全部字段（含 power_on）负责，
 绝不混入上一轮的旧值；socket 常开而总线断掉因此是可识别的。
 
@@ -103,11 +99,62 @@ SCUD485 客户端把"链路通"和"电池在应答"分开：`bms_daemon` 每秒�
 数值类接口（`get_voltage()`、`get_percentage()` 等）刻意继续返回最后收到的快照，避免短暂
 通信抖动被误判为"电池消失"。TWS 与 GF485 客户端未改动。
 
+## 按名查询（SCUD485）
+
+SCUD485 走**双协议并存**：
+
+- **主 socket（`/tmp/bms.sock`）**：与旧协议完全一致——广播 `BatteryStatus` 定长结构体
+  （单位语义 V/Ah/0..1 分数不变），旧客户端零影响；
+- **副 socket（`/tmp/bms.sock.fields`）**：广播序列化字段映射（FieldMap），daemon 把
+  0x61/0x31 两帧按 `src/drivers/scud485/scud_fields.hpp` 的定义表解码成"字段名 → 数值"
+  后整体发布，客户端用 `get_field(name)` 按名取值（Python：`bms_py.BmsDriver.get_field(name)`）。
+
+```cpp
+auto bms = BmsDriver::create_bms("SCUD485");
+double pplus_mv = bms->get_field("pplus_mv");   // 输出电压 P+
+double soc      = bms->get_field("soc_pct");    // SOC
+bool   uv_alarm = bms->get_field("uv_alarm") != 0.0;  // 欠压告警位
+if (std::isnan(bms->get_field("nope"))) { /* 字段不存在或暂无数据 */ }
+```
+
+- **无异常**：字段不存在（或副 socket 尚未连上）时返回 **NaN**，用 `std::isnan()` /
+  `math.isnan()` 判断，绝不抛异常；旧接口（`get_voltage()` 等）语义不变；
+- **解码公式**：`实数 = raw × 精度 + 偏移`；当前所有字段精度=1、偏移=0（即帧上 raw 值），
+  待规格定点参数确定后仅需修改 `scud_fields.hpp` 中的表常量；
+- **符号**：电压/容量类无符号（u16），电流/温度类补码（i16/i8）；
+- **电流**：`chg_ma`/`dis_ma` 分开提供（`get_field` 取 raw mA）；主协议的
+  `get_current()` 合并为有符号值（**充电为正、放电为负**，单位 A）；
+- **告警**：0x31 的告警字按位展开为具名布尔字段（0.0/1.0）——`uv_alarm`（欠压）、
+  `ov_alarm`（过压）、`chg_h_alarm_flag`/`chg_l_alarm_flag`（充高/低温）、
+  `dsg_h_alarm_flag`/`dsg_l_alarm_flag`（放高/低温）、`mos_h_alarm_flag`（MOS高温）、
+  `cap_low_alarm`（容量低）、`cell_volt_dif_alarm`/`cell_temp_dif_alarm`（压差/温度压差）、
+  `cell_temp_h_alarm`/`cell_temp_l_alarm`（电池温度高/低）、`afe_com_err`（Afe通信失败），
+  原值仍可通过 `get_field("alarm")` 取得；
+- **BAT FLAG**：0x61 的状态字同样按位展开——`sys_dch_on`（Bit15 使能放电，即
+  `is_power_on()` 的依据；注：旧版误取 Bit0 预放电错误位，已按规格修正）、
+  `sys_chg_on`（Bit14 使能充电）、`sys_dch_state`/`sys_chg_state`
+  （Bit12/13 放/充电状态）、`afe_occ_flag`/`afe_ocd_flag`/`afe_scd_flag`/`afe_uv_flag`/
+  `afe_ov_flag`（Bit7-11 前端充/放电过流、短路、欠压、过压保护）、
+  `chg_temp_h_protect`/`chg_temp_l_protect`（Bit5/6 充电高/低温保护）、
+  `dch_temp_h_protect`/`dch_temp_l_protect`（Bit2/3 放电高/低温保护）、
+  `mos_temp_h_protect`（Bit4 MOS高温保护）、`dch_pre_state`/`dch_pre_err`
+  （Bit1/0 预放电状态/错误），原值仍可通过 `get_field("bat_flag")` 取得；
+- **全部字段**：0x61——`bat_flag`、`chg_ma`、`dis_ma`、`chg_mv`、`bplus_mv`、`pplus_mv`、
+  `cell_mv_max`、`cell_idx_max`、`cell_mv_min`、`cell_idx_min`、`cap_mah`、`remain_mah`、
+  `soc_pct`、`cycles`、`vdif_mv`；0x31——`cell1_mv`..`cell13_mv`、`mos_temp`、`cell_temp1`、
+  `cell_temp2`、`heater_temp1`、`heater_temp2`、`tdiff`、`sw_version`、`hw_version`、
+  `alarm`、`protect2`（及上文全部位字段）。
+
 ## 🔄 OTA 固件升级
 
-1. 将新固件命名为 `firmware.bin` 放入 `/opt/bms/` 目录。
+1. 将新固件放到随包服务的默认路径
+   `/opt/roboparty/lib/firmware/TWS_LB-13S2P_APP_v008_20260804-00.bin`；
+   也可以直接用脚本指定任意固件文件：
+   ```bash
+   sudo /opt/roboparty/bin/bms_ota.py /etc/default/bms_daemon /path/to/firmware.bin
+   ```
 2. 执行升级指令：
-```bash
-sudo systemctl start bms_ota
-```
+   ```bash
+   sudo systemctl start bms_ota
+   ```
 3. 通过 `journalctl -u bms_ota -f` 监控升级进度。升级完成后 BMS 会自动复位。

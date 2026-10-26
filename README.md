@@ -41,12 +41,7 @@ After installation, edit the config file to match your actual serial port (e.g.,
 sudo nano /etc/default/bms_daemon
 ```
 
-> **`BMS_TYPE=SCUD485` requires `BAUD_RATE=19200`.** The 485 spec (sec. 2 Serial Attributes) fixes
-> 19200 baud / 8 data bits / no parity / 1 stop bit, while the shipped default is `115200`, so the
-> type must be changed together with the baud rate. Note that `SerialPort::open()` knows only
-> 9600/19200/38400/57600/115200/230400/460800/921600 and silently falls back to 9600 for any other
-> value — a typo then looks like a dead battery (5 read failures, port reopen) instead of a
-> configuration error.
+> **`BMS_TYPE=SCUD485` requires `BAUD_RATE=115200`.**
 
 ### 4. Service Management
 ```bash
@@ -85,9 +80,9 @@ Configured in `/etc/default/bms_daemon`:
 - The destination is opened lazily and retried, so a missing `/dev/ttyS7` never holds up the BMS.
   Forwarding is a monitor feed and is never allowed to slow the Modbus read loop down; if the
   destination stops accepting, bytes are dropped and reported in the journal.
-- `FORWARD_BAUD` is independent of `BAUD_RATE`. Both default to 115200, but on a bus running at
-  another rate (SCUD485 mandates 19200) set `FORWARD_BAUD` to match, otherwise the forwarded
-  stream is garbled while still looking plausible.
+- `FORWARD_BAUD` is independent of `BAUD_RATE`. Both default to 115200, but when the bus runs at
+  another rate set `FORWARD_BAUD` to match, otherwise the forwarded stream is garbled while still
+  looking plausible.
 
 To turn it off:
 
@@ -99,7 +94,7 @@ sudo systemctl restart bms
 ## Data Freshness (SCUD485)
 
 The SCUD485 client separates "the transport is up" from "the battery is answering".
-`bms_daemon` polls the pack with one 0x61 query per second and publishes either a complete
+`bms_daemon` polls the pack with one 0x61+0x31 round per second and publishes either a complete
 fresh snapshot or nothing at all: a record on the wire always vouches for every field it
 carries (power_on included) and never mixes in values from an older round, so a socket that
 stays open while the bus is dead is detectable.
@@ -113,11 +108,40 @@ Numeric getters (`get_voltage()`, `get_percentage()`, ...) keep returning the la
 snapshot on purpose, so a short bus dropout does not look like a missing battery. TWS and
 GF485 clients are unchanged.
 
+## By-Name Query (SCUD485)
+
+SCUD485 runs **dual protocols side by side**:
+
+- **main socket (`/tmp/bms.sock`)**: the legacy wire protocol, unchanged -- fixed-size
+  `BatteryStatus` records in the historical units (V / Ah / 0..1 fraction). Existing clients
+  are unaffected.
+- **fields socket (`/tmp/bms.sock.fields`)**: serialized field-map records. The daemon decodes
+  the 0x61/0x31 frames per the definition tables in `src/drivers/scud485/scud_fields.hpp` and
+  clients fetch values with `get_field(name)` (Python: `bms_py.BmsDriver.get_field(name)`).
+
+`get_field` never throws: **NaN means "no such field" (or no data yet)** -- check with
+`std::isnan()` / `math.isnan()`. Decode is `raw × scale + value_off`; every field currently
+uses scale=1 / offset=0 (raw wire values) until the spec's fixed-point parameters land -- only
+the table constants change then. Voltage/capacity fields are unsigned, current/temperature
+two's complement; `get_current()` merges `chg_ma`/`dis_ma` as charging positive, discharging
+negative. The 0x31 alarm word is expanded into named boolean bits (`uv_alarm`, `ov_alarm`,
+`chg_h_alarm_flag`, `chg_l_alarm_flag`, `dsg_h_alarm_flag`, `dsg_l_alarm_flag`,
+`mos_h_alarm_flag`, `cap_low_alarm`, `cell_volt_dif_alarm`, `cell_temp_dif_alarm`,
+`cell_temp_h_alarm`, `cell_temp_l_alarm`, `afe_com_err`); the raw word stays under `alarm`.
+BAT FLAG expands likewise (`sys_dch_on` at Bit15 is what `is_power_on()` reports -- the old
+build mistakenly used Bit0). Full key list in the Chinese README section above.
+
 ## 🔄 OTA Firmware Update
 
-1. Rename the new firmware to `firmware.bin` and place it in the `/opt/bms/` directory.
+1. Place the new firmware package at
+   `/opt/roboparty/lib/firmware/TWS_LB-13S2P_APP_v008_20260804-00.bin`
+   (the path used by the packaged service), or run the script directly with a
+   custom file:
+   ```bash
+   sudo /opt/roboparty/bin/bms_ota.py /etc/default/bms_daemon /path/to/firmware.bin
+   ```
 2. Execute the update command:
-```bash
-sudo systemctl start bms_ota
-```
+   ```bash
+   sudo systemctl start bms_ota
+   ```
 3. Monitor progress via `journalctl -u bms_ota -f`. The BMS will reset automatically after the update.

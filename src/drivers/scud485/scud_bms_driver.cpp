@@ -10,6 +10,8 @@
 
 #include "scud_bms_driver.hpp"
 
+#include "scud_fields.hpp"
+
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -19,6 +21,7 @@
 #include <cerrno>
 #include <cstring>
 #include <ctime>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -30,8 +33,8 @@ constexpr uint8_t FRAME_TAIL = 0xBB;          // tail marker
 constexpr uint8_t QUERY_PARAM = 0x01;         // query parameter is fixed 0x01
 constexpr uint8_t CMD_USER_INFO = 0x61;       // user communication info
 constexpr uint8_t CMD_BATTERY_SUMMARY = 0x31; // battery summary info
-constexpr int LEN_USER_INFO = 28;
-constexpr int LEN_BATTERY_SUMMARY = 38;
+constexpr int LEN_USER_INFO = 30;       // BYTE0..BYTE29
+constexpr int LEN_BATTERY_SUMMARY = 39; // BYTE0..BYTE38
 } // namespace
 
 ScudBmsProtocol::ScudBmsProtocol(const std::string& port_name, int baud_rate,
@@ -218,100 +221,42 @@ bool ScudBmsProtocol::query_0x31(std::vector<uint8_t>& data) {
     return read_frame(data, CMD_BATTERY_SUMMARY, LEN_BATTERY_SUMMARY);
 }
 
-uint16_t ScudBmsProtocol::get_u16_be(const uint8_t* buf, int offset) {
-    return static_cast<uint16_t>(buf[offset] << 8) | buf[offset + 1];
-}
-
-int16_t ScudBmsProtocol::get_i16_be(const uint8_t* buf, int offset) {
-    return static_cast<int16_t>(get_u16_be(buf, offset));
-}
-
-uint16_t ScudBmsProtocol::get_u16_be(const std::vector<uint8_t>& buf,
-                                     int offset) {
-    return get_u16_be(buf.data(), offset);
-}
-
-int16_t ScudBmsProtocol::get_i16_be(const std::vector<uint8_t>& buf,
-                                    int offset) {
-    return get_i16_be(buf.data(), offset);
-}
-
-// One 0x61 query fills every field the protocol carries, or nothing at all:
-// on failure status is left untouched, so the daemon publishes whole
-// snapshots and a record's freshness always vouches for every field in it,
-// power_on included. The protocol carries no HW/SW version, SOH or IO
-// bitmap; zero them explicitly so the upper layer never sees a stale value.
+// One 0x61 + one 0x31 query fill every field the protocol carries, or
+// nothing at all: on failure out is left untouched, so the daemon publishes
+// whole snapshots and a record's freshness always vouches for every field
+// in it. Both frames are equally mandatory -- the user frame (0x61) carries
+// no temperature at all, and the summary frame (0x31) carries the cell
+// temperatures and the SW/HW version words.
 //
-// Cell extremes come from 0x61 (BYTE12/BYTE14). 0x31 is queried only when
-// this 0x61 omitted them (both mV words zero) — a backfill for packs that
-// do not report extremes in the user frame, mirroring the old rule that a
-// healthy 0x61 must not be overwritten by 0x31. A failing 0x31 skips only
-// the backfill and never fails the read.
-bool ScudBmsProtocol::read_all(bms::BatteryStatus& status) {
+// Parsing is table-driven (scud_fields.hpp): every payload byte the spec
+// defines lands in the map under its query name, fixed-point decoded as
+// raw × scale + value_off. The alarm word is also expanded into its named
+// bits so callers can query "uv_alarm" and friends directly.
+bool ScudBmsProtocol::read_fields(std::unordered_map<std::string, double>& out) {
     std::vector<uint8_t> d;
     if (!query_0x61(d)) return false;
+    std::vector<uint8_t> s;
+    if (!query_0x31(s)) return false;
 
-    const uint16_t flag = get_u16_be(d, 0);
-    const uint16_t chg_ma = get_u16_be(d, 2);
-    const uint16_t dis_ma = get_u16_be(d, 4);
-    const uint16_t max_mv = get_u16_be(d, 12);
-    const uint16_t min_mv = get_u16_be(d, 14);
-
-    status.voltage = get_u16_be(d, 10) / 1000.0; // output voltage, mV -> V
-    // The protocol splits charge and discharge current into two fields; merge
-    // them into one signed current: charging positive, discharging negative.
-    const int mA = (chg_ma > 0) ? static_cast<int>(chg_ma)
-                                : -static_cast<int>(dis_ma);
-    status.current = mA / 1000.0;
-    status.temperature = get_i16_be(d, 24);       // highest cell temp, degC
-    status.max_cell_voltage = max_mv / 1000.0;
-    status.min_cell_voltage = min_mv / 1000.0;
-    status.protect_status = flag;                 // BAT FLAG, all 16 bits
-    status.work_state = flag & 0x000F;            // bit0-3: enable + state flags
-    status.cycles = get_u16_be(d, 26);            // cycle count
-
-    status.percentage = get_u16_be(d, 20) / 100.0; // SOC % -> 0..1 fraction
-    status.charge = get_u16_be(d, 18) / 1000.0;    // remaining Ah, from mAh
-    status.capacity = get_u16_be(d, 16) / 1000.0;  // full capacity, from mAh
-    status.design_capacity = status.capacity;
-    status.soh = 0;
-
-    status.power_on = (flag & 0x0001) ? 1 : 0;    // bit0 sys_dch_on
-    status.io_state = 0;
-    status.sw_version = 0;
-    status.hw_version = 0;
-
-    if (max_mv == 0 && min_mv == 0) {
-        std::vector<uint8_t> cells;
-        if (query_0x31(cells)) {
-            // Recompute the extremes from the 15 cell voltages (unused slots
-            // read 0 and are skipped).
-            uint16_t mx = 0, mn = 0xFFFF;
-            for (int i = 0; i < 15; i++) {
-                const uint16_t v = get_u16_be(cells, i * 2);
-                if (v == 0) continue;
-                if (v > mx) mx = v;
-                if (v < mn) mn = v;
-            }
-            if (mn != 0xFFFF) {
-                status.max_cell_voltage = mx / 1000.0;
-                status.min_cell_voltage = mn / 1000.0;
-            }
-        }
-    }
+    FieldMap map;
+    parse_fields(d.data(), d.size(), kUserInfoFields, kUserInfoFieldCount, map);
+    parse_fields(s.data(), s.size(), kSummaryFields, kSummaryFieldCount, map);
+    expand_bits(map, "alarm", kAlarmBits, kAlarmBitCount);
+    expand_bits(map, "bat_flag", kBatFlagBits, kBatFlagBitCount);
+    out = std::move(map);
     return true;
 }
 
 bool ScudBmsProtocol::read_version_info(bms::BatteryStatus& status) {
-    std::vector<uint8_t> d;
-    if (!query_0x61(d)) return false;
+    FieldMap map;
+    if (!read_fields(map)) return false;
 
-    status.cycles = get_u16_be(d, 26); // cycle count
-    // The protocol carries no HW/SW version and no SOH; zero them so the upper
-    // layer never prints uninitialized values.
-    status.sw_version = 0;
-    status.hw_version = 0;
+    // The protocol carries no SOH; zero it so the upper layer never prints
+    // uninitialized values.
     status.soh = 0;
+    status.cycles = static_cast<uint32_t>(field_or(map, "cycles", 0));
+    status.sw_version = static_cast<uint16_t>(field_or(map, "sw_version", 0));
+    status.hw_version = static_cast<uint16_t>(field_or(map, "hw_version", 0));
     return true;
 }
 
@@ -343,12 +288,17 @@ int64_t monotonic_us() {
 
 } // namespace
 
+
 ScudBmsDriver::ScudBmsDriver(const std::string& socket_path)
-    : BmsDriver(), socket_path_(socket_path) {
+    : BmsDriver(), socket_path_(socket_path),
+      fields_socket_path_(socket_path + ".fields") {
     std::memset(&cached_, 0, sizeof(cached_));
     running_ = true;
     reader_thread_ = std::thread(&ScudBmsDriver::reader_loop, this);
-    logger_->info("SCUD BMS driver started, socket={}", socket_path_);
+    fields_reader_thread_ =
+        std::thread(&ScudBmsDriver::fields_reader_loop, this);
+    logger_->info("SCUD BMS driver started, socket={} fields={}", socket_path_,
+                  fields_socket_path_);
 }
 
 ScudBmsDriver::~ScudBmsDriver() {
@@ -356,7 +306,11 @@ ScudBmsDriver::~ScudBmsDriver() {
     if (reader_thread_.joinable()) {
         reader_thread_.join();
     }
+    if (fields_reader_thread_.joinable()) {
+        fields_reader_thread_.join();
+    }
     disconnect();
+    disconnect_fields();
 }
 
 bool ScudBmsDriver::try_connect() {
@@ -390,6 +344,33 @@ void ScudBmsDriver::disconnect() {
     // data must not survive the teardown, and an open socket that has not
     // delivered a record yet is not a battery the robot may act on.
     last_rx_us_ = -1;
+}
+
+bool ScudBmsDriver::try_connect_fields() {
+    if (fields_sock_fd_ >= 0) return true;
+
+    fields_sock_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fields_sock_fd_ < 0) return false;
+
+    struct sockaddr_un addr {};
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, fields_socket_path_.c_str(),
+            sizeof(addr.sun_path) - 1);
+
+    if (connect(fields_sock_fd_, reinterpret_cast<struct sockaddr*>(&addr),
+                sizeof(addr)) < 0) {
+        close(fields_sock_fd_);
+        fields_sock_fd_ = -1;
+        return false;
+    }
+    return true;
+}
+
+void ScudBmsDriver::disconnect_fields() {
+    if (fields_sock_fd_ >= 0) {
+        close(fields_sock_fd_);
+        fields_sock_fd_ = -1;
+    }
 }
 
 void ScudBmsDriver::reader_loop() {
@@ -474,6 +455,96 @@ void ScudBmsDriver::reader_loop() {
         got = 0;
     }
 }
+
+void ScudBmsDriver::fields_reader_loop() {
+    pthread_setname_np(pthread_self(), "scud_fields_reader");
+
+    std::vector<uint8_t> rx_buf;
+
+    while (running_) {
+        if (!try_connect_fields()) {
+            // Old daemons have no fields socket: stay quiet and retry. The
+            // main BatteryStatus reader is unaffected.
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            continue;
+        }
+
+        struct pollfd pfd {fields_sock_fd_, POLLIN, 0};
+        int ret = poll(&pfd, 1, 500);
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            disconnect_fields();
+            rx_buf.clear();
+            continue;
+        }
+        if (ret == 0) {
+            if (!rx_buf.empty()) {
+                // Partial record with no continuation: the stream is
+                // misaligned; a fresh socket restarts at a record boundary.
+                disconnect_fields();
+                rx_buf.clear();
+            }
+            continue;
+        }
+        if (pfd.revents & (POLLERR | POLLHUP)) {
+            disconnect_fields();
+            rx_buf.clear();
+            continue;
+        }
+
+        uint8_t chunk[2048];
+        ssize_t n = read(fields_sock_fd_, chunk, sizeof(chunk));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            disconnect_fields();
+            rx_buf.clear();
+            continue;
+        }
+        if (n == 0) {
+            disconnect_fields();
+            rx_buf.clear();
+            continue;
+        }
+        rx_buf.insert(rx_buf.end(), chunk, chunk + n);
+
+        // Consume as many complete records as are buffered.
+        while (rx_buf.size() >= sizeof(uint32_t)) {
+            uint32_t payload_len = 0;
+            std::memcpy(&payload_len, rx_buf.data(), sizeof(payload_len));
+            if (payload_len > scud_bms::kMaxFieldRecordBytes) {
+                disconnect_fields();
+                rx_buf.clear();
+                break;
+            }
+            const size_t record_len = sizeof(uint32_t) + payload_len;
+            if (rx_buf.size() < record_len) break; // wait for the rest
+
+            scud_bms::FieldMap map;
+            if (!scud_bms::deserialize_field_map(
+                    rx_buf.data() + sizeof(uint32_t), payload_len, map)) {
+                disconnect_fields();
+                rx_buf.clear();
+                break;
+            }
+            rx_buf.erase(rx_buf.begin(),
+                         rx_buf.begin() + static_cast<long>(record_len));
+
+            std::unique_lock lock(data_mutex_);
+            fields_ = std::move(map);
+        }
+    }
+}
+
+double ScudBmsDriver::get_field(const std::string& name) const {
+    std::shared_lock lock(data_mutex_);
+    auto it = fields_.find(name);
+    // NaN = field unknown or no field record yet: never throws.
+    return (it == fields_.end()) ? std::numeric_limits<double>::quiet_NaN()
+                                 : it->second;
+}
+
+// Legacy BmsDriver getters read the BatteryStatus cache -- the exact same
+// record and units as before the field-map work.
 
 double ScudBmsDriver::get_voltage() const {
     std::shared_lock lock(data_mutex_);

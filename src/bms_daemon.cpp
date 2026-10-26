@@ -23,6 +23,7 @@
 #include "bms_driver.hpp"
 #include "gfcan_bms_driver.hpp"
 #include "nrf_pmic_driver.hpp"
+#include "scud_fields.hpp"
 
 // Written by the signal handler, read by the main loop and the forward pump
 // thread, so it has to be atomic rather than a plain bool.
@@ -231,11 +232,11 @@ class UartForwarder {
     bool source_warned_ = false;
 };
 
-// Protocols that can fill a complete BatteryStatus from a single bus
-// transaction publish whole snapshots: a record on the wire then vouches for
-// every field in it, and nothing is carried over from an older round.
-// Everything else keeps the per-field merge loop below. Adding a protocol to
-// this list is a deliberate switch of its broadcast semantics.
+// Protocols that can fill a complete field map from one bus round publish
+// whole snapshots: a record on the wire then vouches for every field in it,
+// and nothing is carried over from an older round. Everything else keeps the
+// per-field merge loop below and broadcasts BatteryStatus. Adding a protocol
+// to this list is a deliberate switch of its broadcast semantics.
 template <typename P>
 struct publishes_snapshots : std::false_type {};
 
@@ -302,13 +303,46 @@ static void run_daemon(Protocol& proto, const std::string& port,
 
     chmod(socket_path.c_str(), 0666);
 
+    /* Secondary "fields" socket (snapshot protocols only): carries serialized
+       FieldMap records for get_field() clients. The main socket above keeps
+       the legacy BatteryStatus wire protocol untouched. */
+    int fields_server_fd = -1;
+    std::string fields_socket_path;
+    if constexpr (publishes_snapshots<Protocol>::value) {
+        fields_socket_path = socket_path + ".fields";
+        fields_server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fields_server_fd >= 0) {
+            struct sockaddr_un faddr {};
+            faddr.sun_family = AF_UNIX;
+            strncpy(faddr.sun_path, fields_socket_path.c_str(),
+                    sizeof(faddr.sun_path) - 1);
+            unlink(fields_socket_path.c_str());
+            if (bind(fields_server_fd, reinterpret_cast<struct sockaddr*>(&faddr),
+                     sizeof(faddr)) < 0 ||
+                listen(fields_server_fd, 5) < 0) {
+                std::cerr << "[BMS Daemon] Fields socket failed on "
+                          << fields_socket_path << "; get_field() unavailable"
+                          << std::endl;
+                close(fields_server_fd);
+                fields_server_fd = -1;
+            } else {
+                chmod(fields_socket_path.c_str(), 0666);
+                std::cout << "[BMS Daemon] Field map broadcast on "
+                          << fields_socket_path << std::endl;
+            }
+        }
+    }
+
     std::cout << "[BMS Daemon] Started. Heartbeat Active on " << port
               << std::endl;
 
     bms::BatteryStatus status_to_send;
     memset(&status_to_send, 0, sizeof(status_to_send));
+    // Serialized FieldMap record for the fields socket (snapshot protocols).
+    std::string fields_payload;
 
     std::vector<int> clients;
+    std::vector<int> fields_clients;
     int failure_count = 0;
 
     while (g_running) {
@@ -316,7 +350,10 @@ static void run_daemon(Protocol& proto, const std::string& port,
         // been reopened, in which case the tap is re-pointed at the new fd.
         if (forwarder) forwarder->poll_sink();
 
-        bms::BatteryStatus raw_data{};
+        // Only the legacy merge loop reads raw_data. [[maybe_unused]] because
+        // which branch is live depends on the protocol instantiation.
+        [[maybe_unused]] bms::BatteryStatus raw_data{};
+        [[maybe_unused]] scud_bms::FieldMap fields;
         bool ok_read = false;
         // Whether power_on in this round's broadcast is fresh: the legacy
         // loop only knows that after a successful IO-state read, the
@@ -324,11 +361,13 @@ static void run_daemon(Protocol& proto, const std::string& port,
         bool show_power = false;
 
         if constexpr (publishes_snapshots<Protocol>::value) {
-            // One transaction fills every field or none, so the published
-            // snapshot can never mix rounds.
-            ok_read = proto.read_all(raw_data);
+            // One round fills every field or none, so the published snapshot
+            // can never mix rounds. BatteryStatus stays the main wire record;
+            // the field map rides the fields socket for get_field() clients.
+            ok_read = proto.read_fields(fields);
             if (ok_read) {
-                status_to_send = raw_data;
+                scud_bms::fill_battery_status(fields, status_to_send);
+                fields_payload = scud_bms::serialize_field_map(fields);
                 show_power = true;
             }
         } else {
@@ -385,12 +424,28 @@ static void run_daemon(Protocol& proto, const std::string& port,
             }
             std::cout << std::endl;
 
+            // Main socket: the legacy BatteryStatus wire record, unchanged
+            // for every protocol and every existing client.
             for (auto it = clients.begin(); it != clients.end();) {
                 if (write(*it, &status_to_send, sizeof(status_to_send)) < 0) {
                     close(*it);
                     it = clients.erase(it);
                 } else {
                     ++it;
+                }
+            }
+
+            // Fields socket: serialized FieldMap for get_field() clients.
+            if constexpr (publishes_snapshots<Protocol>::value) {
+                for (auto it = fields_clients.begin();
+                     it != fields_clients.end();) {
+                    if (write(*it, fields_payload.data(),
+                              fields_payload.size()) < 0) {
+                        close(*it);
+                        it = fields_clients.erase(it);
+                    } else {
+                        ++it;
+                    }
                 }
             }
         } else {
@@ -413,11 +468,27 @@ static void run_daemon(Protocol& proto, const std::string& port,
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(server_fd, &rfds);
-        if (select(server_fd + 1, &rfds, nullptr, nullptr, &tv) > 0) {
-            int cfd = accept(server_fd, nullptr, nullptr);
-            if (cfd >= 0) {
-                clients.push_back(cfd);
-                std::cout << "[BMS Daemon] New client connected." << std::endl;
+        int nfds = server_fd;
+        if (fields_server_fd >= 0) {
+            FD_SET(fields_server_fd, &rfds);
+            if (fields_server_fd > nfds) nfds = fields_server_fd;
+        }
+        if (select(nfds + 1, &rfds, nullptr, nullptr, &tv) > 0) {
+            if (FD_ISSET(server_fd, &rfds)) {
+                int cfd = accept(server_fd, nullptr, nullptr);
+                if (cfd >= 0) {
+                    clients.push_back(cfd);
+                    std::cout << "[BMS Daemon] New client connected."
+                              << std::endl;
+                }
+            }
+            if (fields_server_fd >= 0 && FD_ISSET(fields_server_fd, &rfds)) {
+                int cfd = accept(fields_server_fd, nullptr, nullptr);
+                if (cfd >= 0) {
+                    fields_clients.push_back(cfd);
+                    std::cout << "[BMS Daemon] New fields client connected."
+                              << std::endl;
+                }
             }
         }
 
@@ -425,8 +496,11 @@ static void run_daemon(Protocol& proto, const std::string& port,
     }
 
     for (int c : clients) close(c);
+    for (int c : fields_clients) close(c);
     close(server_fd);
+    if (fields_server_fd >= 0) close(fields_server_fd);
     unlink(socket_path.c_str());
+    if (!fields_socket_path.empty()) unlink(fields_socket_path.c_str());
     std::cout << "[BMS Daemon] Shutdown complete." << std::endl;
 }
 
@@ -542,9 +616,9 @@ int main(int argc, char** argv) {
               << " Baud=" << baud << " Timeout=" << timeout << std::endl;
 
     // The source is read at BAUD_RATE while the sink runs at FORWARD_BAUD.
-    // Both default to 115200, but a host whose bus runs at another rate (the
-    // SCUD485 spec mandates 19200) would forward into a UART transmitting at
-    // the wrong speed and produce a plausible-looking but garbled stream.
+    // Both default to 115200 (SCUD485 is 115200). A mismatch between the two
+    // would forward into a UART transmitting at the wrong speed and produce
+    // a plausible-looking but garbled stream.
     if (forward.enabled && forward.baud != baud &&
         same_device(forward.port_a, port)) {
         std::cerr << "[BMS Daemon] FORWARD_BAUD=" << forward.baud
@@ -571,8 +645,7 @@ int main(int argc, char** argv) {
                              : nullptr;
         run_daemon(proto, port, "/tmp/gf_bms.sock", forwarder.get());
     } else if (type == "SCUD485") {
-        // Point-to-point frames (no device address). The spec mandates 19200
-        // 8N1, so BAUD_RATE must be set to 19200 in /etc/default/bms_daemon.
+        // Point-to-point frames (no device address). 115200 8N1.
         scud_bms::ScudBmsProtocol proto(port, baud, timeout);
         auto forwarder = forward.enabled
                              ? make_protocol_forwarder(forward, proto, port)

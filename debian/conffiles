@@ -1,3 +1,0 @@
-/etc/default/bms_daemon
-/etc/systemd/system/bms.service
-/etc/systemd/system/bms_ota.service

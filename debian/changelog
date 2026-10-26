@@ -1,3 +1,35 @@
+roboparty-bms (1.6.2-1) stable; urgency=medium
+
+  * Install the OTA helper (bms_ota.py) and bundled firmware, which were
+    referenced by bms_ota.service and the postinst symlink but never shipped.
+  * Ship the public headers bms_driver.hpp pulls in (protocol/serial,
+    protocol/can and the driver headers) so external C++ clients build.
+  * Fix roboparty_bmsConfig.cmake to reference the exported gf485_bms target
+    instead of the nonexistent gf_bms target.
+  * Drop the redundant debian/conffiles; debhelper already registers /etc
+    files and the manual list produced duplicate entries.
+  * Add ccache to Build-Depends and only use it when found, so clean
+    pbuilder/sbuild builds no longer fail.
+  * Align the OTA firmware filename with the bundled TWS_ prefixed image and
+    document the paths the service actually uses.
+
+ -- RoboParty <2321901849@qq.com>  Mon, 26 Oct 2026 18:15:00 +0800
+
+roboparty-bms (1.6.1-1) stable; urgency=medium
+
+  * Give SCUD485 applications complete, by-name access to everything the
+    battery reports: per-cell voltages, all temperatures, capacities,
+    versions, and every alarm and protection state — 67 values in all —
+    where previously only a small fixed set was available. Existing
+    integrations keep working unchanged, while the power status is now
+    reported correctly and two frame-parsing errors are fixed.
+  * Include simple tooling to dump the full battery state, record it once
+    per second over multi-hour stability runs, and analyze recordings for
+    gaps, dropouts, or anomalies — all verified against real hardware with
+    two flawless runs (2 h and 15 min, zero data loss).
+
+ -- cenliey <cenliey@qq.com>  Thu, 26 Oct 2026 12:00:00 +0800
+
 roboparty-bms (1.6.0-1) stable; urgency=medium
 
   * Move UART forwarding into bms_daemon, replacing robopi-addon's
