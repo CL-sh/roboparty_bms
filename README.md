@@ -133,9 +133,15 @@ build mistakenly used Bit0). Full key list in the Chinese README section above.
 
 ## 🔄 OTA Firmware Update
 
-1. Rename the new firmware to `firmware.bin` and place it in the `/opt/bms/` directory.
+1. Place the new firmware package at
+   `/opt/roboparty/lib/firmware/TWS_LB-13S2P_APP_v008_20260804-00.bin`
+   (the path used by the packaged service), or run the script directly with a
+   custom file:
+   ```bash
+   sudo /opt/roboparty/bin/bms_ota.py /etc/default/bms_daemon /path/to/firmware.bin
+   ```
 2. Execute the update command:
-```bash
-sudo systemctl start bms_ota
-```
+   ```bash
+   sudo systemctl start bms_ota
+   ```
 3. Monitor progress via `journalctl -u bms_ota -f`. The BMS will reset automatically after the update.

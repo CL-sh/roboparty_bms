@@ -11,10 +11,13 @@ include("${CMAKE_CURRENT_LIST_DIR}/roboparty_bmsTargets.cmake")
 
 if(NOT TARGET roboparty_bms::roboparty_bms)
     add_library(roboparty_bms::roboparty_bms INTERFACE IMPORTED)
-    target_link_libraries(roboparty_bms::roboparty_bms INTERFACE 
+    target_link_libraries(roboparty_bms::roboparty_bms INTERFACE
         roboparty_bms::bms
         roboparty_bms::tws_bms
-        roboparty_bms::gf_bms
+        roboparty_bms::gf485_bms
+        roboparty_bms::scud485_bms
+        roboparty_bms::gfcan_bms
+        roboparty_bms::nrf_pmic
     )
 endif()
 

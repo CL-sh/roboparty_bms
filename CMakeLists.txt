@@ -13,7 +13,10 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
 if(NOT CMAKE_CROSSCOMPILING)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
 endif()
-set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+endif()
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -57,6 +60,20 @@ target_link_libraries(bms_py PUBLIC bms)
 
 # ---- Install ----
 install(DIRECTORY include/ DESTINATION include)
+
+# Public headers pulled in by bms_driver.hpp and the driver targets.
+install(FILES src/protocol/serial/serial_port.hpp
+    DESTINATION include/protocol/serial)
+install(FILES src/protocol/can/socket_can.hpp
+    DESTINATION include/protocol/can)
+install(FILES
+    src/drivers/gf485/gf_bms_driver.hpp
+    src/drivers/gfcan/gfcan_bms_driver.hpp
+    src/drivers/nrf/nrf_pmic_driver.hpp
+    src/drivers/scud485/scud_bms_driver.hpp
+    src/drivers/scud485/scud_fields.hpp
+    src/drivers/tws/tws_bms_driver.hpp
+    DESTINATION include)
 
 install(TARGETS bms_daemon DESTINATION bin)
 

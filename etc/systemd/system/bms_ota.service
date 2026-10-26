@@ -6,7 +6,7 @@ After=network.target
 Type=oneshot
 ExecStartPre=/bin/systemctl stop bms.service
 # Default OTA firmware package path
-ExecStart=/usr/bin/python3 /usr/bin/bms_ota.py /etc/default/bms_daemon /opt/roboparty/lib/firmware/LB-13S2P_APP_v008_20260804-00.bin
+ExecStart=/usr/bin/python3 /usr/bin/bms_ota.py /etc/default/bms_daemon /opt/roboparty/lib/firmware/TWS_LB-13S2P_APP_v008_20260804-00.bin
 ExecStopPost=/bin/systemctl start bms.service
 RemainAfterExit=no
 User=root

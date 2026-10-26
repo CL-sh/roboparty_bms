@@ -2,7 +2,7 @@ Source: roboparty-bms
 Section: base
 Priority: optional
 Maintainer: wentywenty <2321901849@qq.com>
-Build-Depends: debhelper-compat (= 12), cmake, pkg-config,
+Build-Depends: debhelper-compat (= 12), cmake, ccache, pkg-config,
                libspdlog-dev, libfmt-dev, pybind11-dev, python3-dev
 
 Package: roboparty-bms
