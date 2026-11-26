@@ -3,7 +3,7 @@
 
 /**
  * @file scud_fields.hpp
- * @brief SCUD485 字段映射表与定点解码（表驱动）。
+ * @brief 字段映射表与定点解码（表驱动，SCUD485 定义，GF485 复用）。
  * @details 每个通讯帧一张 constexpr 定义表（字段名/字节偏移/符号/精度/偏移），
  *          parse_fields() 按表把载荷解码进 FieldMap（std::unordered_map）。
  *          解码公式：实数 = raw × scale + value_off；多字节字段大端。
@@ -21,7 +21,7 @@
 
 namespace scud_bms {
 
-enum class RawKind : uint8_t { U8, I8, U16, I16, BCD16 };
+enum class RawKind : uint8_t { U8, I8, U16, I16, U32, BCD16 };
 
 struct FieldSpec {
     const char* name;    // 查询键，如 "pplus_mv"
@@ -157,7 +157,7 @@ inline void expand_bits(FieldMap& map, const char* word,
                         const NamedBit* bits, size_t count) {
     auto it = map.find(word);
     if (it == map.end()) return;
-    const uint16_t value = static_cast<uint16_t>(it->second);
+    const uint32_t value = static_cast<uint32_t>(it->second);
     for (size_t i = 0; i < count; ++i) {
         map[bits[i].name] = ((value >> bits[i].bit) & 1u) ? 1.0 : 0.0;
     }
@@ -210,11 +210,12 @@ inline void parse_fields(const uint8_t* payload, size_t len,
                          FieldMap& out) {
     for (size_t i = 0; i < count; ++i) {
         const FieldSpec& f = fields[i];
-        const size_t width =
-            (f.kind == RawKind::U8 || f.kind == RawKind::I8) ? 1 : 2;
+        const size_t width = (f.kind == RawKind::U8 || f.kind == RawKind::I8)
+                                 ? 1
+                                 : (f.kind == RawKind::U32 ? 4 : 2);
         if (static_cast<size_t>(f.offset) + width > len) continue;
 
-        int32_t raw = 0;
+        int64_t raw = 0;
         switch (f.kind) {
         case RawKind::U8:
             raw = payload[f.offset];
@@ -230,6 +231,12 @@ inline void parse_fields(const uint8_t* payload, size_t len,
             raw = static_cast<int16_t>(
                 (static_cast<uint16_t>(payload[f.offset]) << 8) |
                 payload[f.offset + 1]);
+            break;
+        case RawKind::U32:
+            raw = (static_cast<int64_t>(payload[f.offset]) << 24) |
+                  (static_cast<int64_t>(payload[f.offset + 1]) << 16) |
+                  (static_cast<int64_t>(payload[f.offset + 2]) << 8) |
+                  payload[f.offset + 3];
             break;
         case RawKind::BCD16: {
             // 版本字按 BCD 解读：4 个十六进制位即十进制数值（0x0075 → 75）

@@ -77,8 +77,9 @@ class BmsDriver {
     }
     virtual ~BmsDriver() = default;
 
+    // socket_path 传空串走各类型自己的默认（GF485=/tmp/gf_bms.sock 等）。
     static std::shared_ptr<BmsDriver> create_bms(const std::string& bms_type,
-                                                  const std::string& socket_path = "/tmp/bms.sock");
+                                                  const std::string& socket_path = "");
 
     virtual double get_voltage() const = 0;
     virtual double get_current() const = 0;
@@ -195,10 +196,10 @@ public:
     // cannot steal bytes from the protocol's own reads.
     void set_forward_fd(int fd) { serial_.set_forward_fd(fd); }
 
-    bool read_basic_info(bms::BatteryStatus& status);
+    // 一次读 4 块填满 V1.3 全表（gf_fields.hpp），全成功才交付：同 SCUD
+    // 快照语义，一条记录担保其中每个字段。失败时 out 不动，返回 false。
+    bool read_fields(std::unordered_map<std::string, double>& out);
     bool read_version_info(bms::BatteryStatus& status);
-    bool read_capacity_info(bms::BatteryStatus& status);
-    bool read_io_state(bms::BatteryStatus& status);
     bool read_serial_number(std::string& sn);
     bool set_discharge_output(bool enable);
 
@@ -213,8 +214,8 @@ private:
     uint16_t calculate_crc(const uint8_t* data, size_t len);
     void send_read_request(uint16_t start_addr, uint16_t num_regs);
     bool read_response(std::vector<uint8_t>& buffer, int expected_bytes);
-    bool write_multiple_registers(uint16_t start_addr,
-                                  const std::vector<uint16_t>& values);
+    bool read_block(uint16_t start_addr, uint16_t num_regs,
+                    std::vector<uint8_t>& payload);
 
     uint16_t get_u16_be(const uint8_t* buf, int offset);
     int16_t get_i16_be(const uint8_t* buf, int offset);

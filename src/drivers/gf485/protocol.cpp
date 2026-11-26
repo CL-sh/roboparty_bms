@@ -2,6 +2,7 @@
 // Copyright (C) 2026 wentywenty
 
 #include "bms_driver.hpp"
+#include "gf_fields.hpp"
 #include "protocol/serial/serial_port.hpp"
 #include <unistd.h>
 
@@ -12,7 +13,6 @@
 namespace gf_bms {
 
 #define FUNC_READ 0x03
-#define FUNC_WRITE_MULTI 0x10
 
 static const uint8_t aucCRCHi[] = {
     0x00, 0xC1, 0x81, 0x40, 0x01, 0xC0, 0x80, 0x41, 0x01, 0xC0, 0x80, 0x41, 0x00, 0xC1, 0x81, 0x40,
@@ -157,61 +157,48 @@ uint32_t GfBmsProtocol::get_u32_be(const std::vector<uint8_t>& buf,
     return get_u32_be(buf.data(), offset);
 }
 
-bool GfBmsProtocol::write_multiple_registers(
-    uint16_t start_addr, const std::vector<uint16_t>& values) {
+// 一块 0x03 读取：返回纯数据区（去掉帧头 3 字节和 CRC 2 字节）。
+// 帧间 100ms：规范写 ≥10ms，但实测该包在 10ms 间隔下会丢应答，100ms 稳定。
+bool GfBmsProtocol::read_block(uint16_t start_addr, uint16_t num_regs,
+                               std::vector<uint8_t>& payload) {
     flush();
-    usleep(10000);
+    usleep(100000);
 
-    uint16_t count = static_cast<uint16_t>(values.size());
-    size_t data_bytes = count * 2;
-    size_t frame_size = 9 + data_bytes;
-    std::vector<uint8_t> frame(frame_size);
+    send_read_request(start_addr, num_regs);
+    std::vector<uint8_t> buf;
+    if (!read_response(buf, 2 * num_regs + 5)) return false;
 
-    frame[0] = dev_addr_;
-    frame[1] = FUNC_WRITE_MULTI;
-    frame[2] = static_cast<uint8_t>(start_addr >> 8);
-    frame[3] = static_cast<uint8_t>(start_addr);
-    frame[4] = static_cast<uint8_t>(count >> 8);
-    frame[5] = static_cast<uint8_t>(count);
-    frame[6] = static_cast<uint8_t>(data_bytes);
-
-    for (size_t i = 0; i < count; i++) {
-        frame[7 + i * 2] = static_cast<uint8_t>(values[i] >> 8);
-        frame[8 + i * 2] = static_cast<uint8_t>(values[i]);
-    }
-
-    uint16_t crc = calculate_crc(frame.data(), frame_size - 2);
-    frame[frame_size - 2] = crc & 0xFF;
-    frame[frame_size - 1] = crc >> 8;
-
-    ssize_t _ = serial_.write_raw( frame.data(), frame_size);
-    (void)_;
-
-    std::vector<uint8_t> resp;
-    return read_response(resp, 8);
+    payload.assign(buf.begin() + 3, buf.end() - 2);
+    return true;
 }
 
-bool GfBmsProtocol::read_basic_info(bms::BatteryStatus& status) {
-    flush();
-    usleep(10000);
+// V1.3 全表快照（gf_fields.hpp 表驱动）：四块全成功才交付，一块失败整体作废，
+// 同 SCUD 语义，一条记录担保其中每个字段。
+bool GfBmsProtocol::read_fields(std::unordered_map<std::string, double>& out) {
+    std::vector<uint8_t> ver, id, cell, chg;
+    if (!read_block(kVerStart, kVerCount, ver)) return false;
+    if (!read_block(kIdStart, kIdCount, id)) return false;
+    if (!read_block(kCellStart, kCellCount, cell)) return false;
+    if (!read_block(kChgStart, kChgCount, chg)) return false;
 
-    send_read_request(114, 20);
-    std::vector<uint8_t> buf;
-    if (!read_response(buf, 45)) return false;
+    FieldMap map;
+    parse_fields(ver.data(), ver.size(), kVersionFields, kVersionFieldCount, map);
+    parse_fields(id.data(), id.size(), kIdFields, kIdFieldCount, map);
+    parse_fields(cell.data(), cell.size(), kCellFields, kCellFieldCount, map);
+    parse_fields(chg.data(), chg.size(), kChgFields, kChgFieldCount, map);
+    expand_bits(map, "sys_state", kSysStateBits, kSysStateBitCount);
+    expand_bits(map, "alarm", kAlarmBits, kAlarmBitCount);
+    expand_bits(map, "protect", kProtectBits, kProtectBitCount);
+    expand_bits(map, "fault", kFaultBits, kFaultBitCount);
+    expand_balance(map);
 
-    status.voltage = get_u16_be(buf, 3) / 100.0;
-    status.current = get_i16_be(buf, 5) / 100.0;
-    status.temperature = get_u16_be(buf, 41) - 273.15;
-    status.protect_status = get_u32_be(buf, 21);
-    status.work_state = get_u16_be(buf, 11);
-    status.max_cell_voltage = get_u16_be(buf, 35) / 1000.0;
-    status.min_cell_voltage = get_u16_be(buf, 37) / 1000.0;
+    out = std::move(map);
     return true;
 }
 
 bool GfBmsProtocol::read_version_info(bms::BatteryStatus& status) {
     flush();
-    usleep(10000);
+    usleep(100000);
 
     send_read_request(1, 2);
     std::vector<uint8_t> buf;
@@ -220,12 +207,12 @@ bool GfBmsProtocol::read_version_info(bms::BatteryStatus& status) {
     status.sw_version = get_u16_be(buf, 3);
     status.hw_version = get_u16_be(buf, 5);
 
-    usleep(50000);
+    usleep(100000);
     flush();
     send_read_request(117, 1);
     if (read_response(buf, 7)) status.soh = get_u16_be(buf, 3);
 
-    usleep(50000);
+    usleep(100000);
     flush();
     send_read_request(129, 1);
     if (read_response(buf, 7)) status.cycles = get_u16_be(buf, 3);
@@ -233,36 +220,12 @@ bool GfBmsProtocol::read_version_info(bms::BatteryStatus& status) {
     return true;
 }
 
-bool GfBmsProtocol::read_capacity_info(bms::BatteryStatus& status) {
-    flush();
-    usleep(10000);
-
-    send_read_request(116, 14);
-    std::vector<uint8_t> buf;
-    if (!read_response(buf, 33)) return false;
-
-    status.percentage = get_u16_be(buf, 3) / 100.0;
-    status.soh = get_u16_be(buf, 5);
-    status.charge = get_u16_be(buf, 23) / 100.0;
-    status.capacity = get_u16_be(buf, 27) / 100.0;
-    status.design_capacity = get_u16_be(buf, 25) / 100.0;
-    return true;
-}
-
-bool GfBmsProtocol::read_io_state(bms::BatteryStatus&) { return false; }
-
+// 电池编码（SN）：100 起 12 个寄存器 = 24 字节 ASCII，未烧录为空格。
 bool GfBmsProtocol::read_serial_number(std::string& sn) {
-    flush();
-    usleep(10000);
+    std::vector<uint8_t> payload;
+    if (!read_block(kSnStart, kSnCount, payload)) return false;
 
-    send_read_request(100, 12);
-    std::vector<uint8_t> buf;
-    if (!read_response(buf, 29)) return false;
-
-    char sn_str[25];
-    for (int i = 0; i < 24; i++) sn_str[i] = buf[3 + i];
-    sn_str[24] = '\0';
-    sn = std::string(sn_str);
+    sn = parse_sn(payload.data(), payload.size());
     return true;
 }
 

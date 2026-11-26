@@ -22,6 +22,7 @@
 #include <type_traits>
 #include "bms_driver.hpp"
 #include "gfcan_bms_driver.hpp"
+#include "gf_fields.hpp"
 #include "gd_pmic_driver.hpp"
 #include "scud_fields.hpp"
 
@@ -243,17 +244,41 @@ struct publishes_snapshots : std::false_type {};
 template <>
 struct publishes_snapshots<scud_bms::ScudBmsProtocol> : std::true_type {};
 
+// GF485 V1.3 全表（gf_fields.hpp）一轮 4 块读满字段表，同样走快照广播。
+template <>
+struct publishes_snapshots<gf_bms::GfBmsProtocol> : std::true_type {};
+
 static_assert(publishes_snapshots<scud_bms::ScudBmsProtocol>::value,
               "SCUD485 must publish snapshot records");
+static_assert(publishes_snapshots<gf_bms::GfBmsProtocol>::value,
+              "GF485 must publish snapshot records");
 static_assert(!publishes_snapshots<tws_bms::BmsProtocol>::value,
               "TWS keeps the per-field carry-forward loop");
-static_assert(!publishes_snapshots<gf_bms::GfBmsProtocol>::value,
-              "GF keeps the per-field carry-forward loop");
+
+// 字段表 → BatteryStatus 的桥接，各快照协议自持单位换算。
+template <typename P>
+struct status_filler;
+
+template <>
+struct status_filler<scud_bms::ScudBmsProtocol> {
+    static void fill(const scud_bms::FieldMap& map, bms::BatteryStatus& s) {
+        scud_bms::fill_battery_status(map, s);
+    }
+};
+
+template <>
+struct status_filler<gf_bms::GfBmsProtocol> {
+    static void fill(const scud_bms::FieldMap& map, bms::BatteryStatus& s) {
+        gf_bms::fill_battery_status(map, s);
+    }
+};
 
 // Protocols whose broadcast BatteryStatus also carries the battery's static
 // identity (SW/HW version, serial number), filled once by the daemon. TWS
-// only: GF/SCUD broadcasts keep their exact current content, and SCUD is
-// never forced through its 0x61+0x31 double read for identity.
+// only: SCUD broadcasts keep their exact current content, and SCUD is never
+// forced through its 0x61+0x31 double read for identity. GF485 gets its
+// SW/HW words from the field map (fill_battery_status) and its serial number
+// through broadcasts_serial below.
 template <typename P>
 struct publishes_static_ids : std::false_type {};
 
@@ -262,6 +287,18 @@ struct publishes_static_ids<tws_bms::BmsProtocol> : std::true_type {};
 
 static_assert(publishes_static_ids<tws_bms::BmsProtocol>::value,
               "TWS broadcasts must carry version and serial number");
+
+// Protocols whose broadcast BatteryStatus carries the serial number, read
+// once at daemon start (GF485: one 12-register read; strings cannot ride the
+// field map).
+template <typename P>
+struct broadcasts_serial : std::false_type {};
+
+template <>
+struct broadcasts_serial<gf_bms::GfBmsProtocol> : std::true_type {};
+
+static_assert(broadcasts_serial<gf_bms::GfBmsProtocol>::value,
+              "GF485 broadcasts must carry the serial number");
 
 template <typename Protocol>
 static void run_daemon(Protocol& proto, const std::string& port,
@@ -326,6 +363,17 @@ static void run_daemon(Protocol& proto, const std::string& port,
             have_app = true;
             info_dirty = true;
             std::cout << " > App Version: " << app << std::endl;
+        }
+    }
+
+    // GF485: SN rides every broadcast record (strings cannot ride the field
+    // map), one 12-register read at start.
+    if constexpr (broadcasts_serial<Protocol>::value) {
+        std::string sn;
+        if (proto.read_serial_number(sn)) {
+            strncpy(status_to_send.serial_number, sn.c_str(),
+                    sizeof(status_to_send.serial_number) - 1);
+            std::cout << " > SN: " << sn << std::endl;
         }
     }
 
@@ -447,7 +495,7 @@ static void run_daemon(Protocol& proto, const std::string& port,
             // the field map rides the fields socket for get_field() clients.
             ok_read = proto.read_fields(fields);
             if (ok_read) {
-                scud_bms::fill_battery_status(fields, status_to_send);
+                status_filler<Protocol>::fill(fields, status_to_send);
                 fields_payload = scud_bms::serialize_field_map(fields);
                 show_power = true;
             }

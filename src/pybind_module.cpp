@@ -21,7 +21,8 @@ PYBIND11_MODULE(bms_py, m) {
     py::class_<BmsDriver, std::shared_ptr<BmsDriver>>(m, "BmsDriver")
         .def_static("create_bms", &BmsDriver::create_bms,
                      py::arg("bms_type"),
-                     py::arg("socket_path") = "/tmp/bms.sock")
+                     // 空串 → 各类型默认 socket（GF485 是 /tmp/gf_bms.sock）。
+                     py::arg("socket_path") = "")
         .def("get_voltage", &BmsDriver::get_voltage)
         .def("get_current", &BmsDriver::get_current)
         .def("get_temperature", &BmsDriver::get_temperature)

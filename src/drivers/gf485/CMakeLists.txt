@@ -8,6 +8,7 @@ target_include_directories(gf485_bms_protocol
   PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/drivers/scud485>
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(gf485_bms_protocol PUBLIC ${PUBLIC_DEPENDENCIES} bms_protocol)
@@ -21,6 +22,7 @@ target_include_directories(gf485_bms
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/drivers/scud485>
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(gf485_bms PUBLIC ${PUBLIC_DEPENDENCIES})
